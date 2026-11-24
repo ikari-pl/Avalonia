@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Diagnostics;
@@ -20,9 +21,17 @@ internal class CompositingRenderer : IRendererWithCompositor, IHitTester
     private readonly IPresentationSource _root;
     private readonly Compositor _compositor;
     private readonly RenderDataDrawingContext _recorder;
-    private readonly HashSet<Visual> _dirty = new();
-    private readonly HashSet<Visual> _recalculateChildren = new();
+    private readonly Dictionary<Visual, DirtyFlags> _dirty = new();
     private readonly Action _update;
+
+    [Flags]
+    private enum DirtyFlags
+    {
+        CompositionProperties = 1,
+        Content = 2,
+        Children = 4,
+        All = CompositionProperties | Content | Children
+    }
 
     private bool _queuedUpdate;
     private bool _queuedSceneInvalidation;
@@ -81,7 +90,12 @@ internal class CompositingRenderer : IRendererWithCompositor, IHitTester
     }
     
     /// <inheritdoc/>
-    public void AddDirty(Visual visual)
+    public void AddDirty(Visual visual) => AddDirty(visual, DirtyFlags.All);
+
+    /// <inheritdoc/>
+    public void AddDirtyCompositionProperties(Visual visual) => AddDirty(visual, DirtyFlags.CompositionProperties);
+
+    private void AddDirty(Visual visual, DirtyFlags flags)
     {
         if (_isDisposed)
             return;
@@ -92,11 +106,10 @@ internal class CompositingRenderer : IRendererWithCompositor, IHitTester
         {
             // Queuing a detached visual would keep it alive for as long as rendering is stopped.
             _dirty.Remove(visual);
-            _recalculateChildren.Remove(visual);
         }
         else
         {
-            _dirty.Add(visual);
+            CollectionsMarshal.GetValueRefOrAddDefault(_dirty, visual, out _) |= flags;
         }
 
         QueueUpdate();
@@ -183,38 +196,39 @@ internal class CompositingRenderer : IRendererWithCompositor, IHitTester
             return;
         if (_updating)
             throw new InvalidOperationException("Visual was invalidated during the render pass");
-        _recalculateChildren.Add(visual);
+        CollectionsMarshal.GetValueRefOrAddDefault(_dirty, visual, out _) |= DirtyFlags.Children;
         QueueUpdate();
     }
 
     private void UpdateCore()
     {
         _queuedUpdate = false;
-        foreach (var visual in _dirty)
+        foreach (var (visual, flags) in _dirty)
         {
             var comp = visual.CompositionVisual;
             if(comp == null)
                 continue;
-            
-            visual.SynchronizeCompositionProperties();
 
-            try
+            if ((flags & DirtyFlags.CompositionProperties) != 0)
+                visual.SynchronizeCompositionProperties();
+
+            if ((flags & DirtyFlags.Content) != 0)
             {
-                visual.Render(_recorder);
-                comp.DrawList = _recorder.GetRenderResults();
+                try
+                {
+                    visual.Render(_recorder);
+                    comp.DrawList = _recorder.GetRenderResults();
+                }
+                finally
+                {
+                    _recorder.Reset();
+                }
             }
-            finally
-            {
-                _recorder.Reset();
-            }
-            
-            visual.SynchronizeCompositionChildVisuals();
+
+            if ((flags & DirtyFlags.Children) != 0)
+                visual.SynchronizeCompositionChildVisuals();
         }
-        foreach(var v in _recalculateChildren)
-            if (!_dirty.Contains(v))
-                v.SynchronizeCompositionChildVisuals();
         _dirty.Clear();
-        _recalculateChildren.Clear();
         
         CompositionTarget.Size = _root.ClientSize;
         CompositionTarget.Scaling = _root.RenderScaling;
@@ -236,7 +250,7 @@ internal class CompositingRenderer : IRendererWithCompositor, IHitTester
         SceneInvalidated?.Invoke(this, new SceneInvalidatedEventArgs(rect));
 
     internal bool HasPendingUpdateForUnitTests(Visual visual) =>
-        _dirty.Contains(visual) || _recalculateChildren.Contains(visual);
+        _dirty.ContainsKey(visual);
     
     private void Update()
     {
@@ -293,7 +307,7 @@ internal class CompositingRenderer : IRendererWithCompositor, IHitTester
 
         CompositionTarget.IsEnabled = true;
 
-        if (_dirty.Count > 0 || _recalculateChildren.Count > 0)
+        if (_dirty.Count > 0)
             QueueUpdate();
     }
 
@@ -315,7 +329,6 @@ internal class CompositingRenderer : IRendererWithCompositor, IHitTester
 
         _isDisposed = true;
         _dirty.Clear();
-        _recalculateChildren.Clear();
         SceneInvalidated = null;
 
         Stop();

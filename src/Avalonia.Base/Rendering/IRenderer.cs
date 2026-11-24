@@ -32,6 +32,13 @@ namespace Avalonia.Rendering
         /// </summary>
         /// <param name="visual">The visual.</param>
         void AddDirty(Visual visual);
+
+        /// <summary>
+        /// Mark a visual as needing its composition properties (such as opacity, transform and clip) to be
+        /// updated, without re-rendering its content.
+        /// </summary>
+        /// <param name="visual">The visual.</param>
+        void AddDirtyCompositionProperties(Visual visual);
         
         /// <summary>
         /// Informs the renderer that the z-ordering of a visual's children has changed.

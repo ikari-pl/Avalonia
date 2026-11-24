@@ -27,6 +27,10 @@ internal sealed class NullRenderer : IRenderer
     {
     }
 
+    public void AddDirtyCompositionProperties(Visual visual)
+    {
+    }
+
     public void Dispose()
     {
     }
